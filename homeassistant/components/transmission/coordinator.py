@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import partial
 import logging
 
@@ -66,6 +66,8 @@ class TransmissionDataUpdateCoordinator(DataUpdateCoordinator[SessionStats]):
         self.host = entry.data[CONF_HOST]
         self._session: transmission_rpc.Session | None = None
         self.port_forwarding: bool | None = None
+        self._last_port_test: datetime | None = None
+        self._port_test_interval = timedelta(hours=1)
         self._all_torrents: list[transmission_rpc.Torrent] = []
         self._completed_torrents: list[transmission_rpc.Torrent] = []
         self._started_torrents: list[transmission_rpc.Torrent] = []
@@ -122,9 +124,20 @@ class TransmissionDataUpdateCoordinator(DataUpdateCoordinator[SessionStats]):
             data = self.api.session_stats()
             self.torrents = self.api.get_torrents()
             self._session = self.api.get_session()
-            self.port_forwarding = self.api.port_test()
         except transmission_rpc.TransmissionError as err:
             raise UpdateFailed("Unable to connect to Transmission client") from err
+
+        # port_test is isolated and rate-limited to once per hour to prevent
+        # flooding the external test server (portcheck.transmissionbt.com)
+        now = datetime.now(tz=timezone.utc)
+        if self._last_port_test is None or (now - self._last_port_test) >= self._port_test_interval:
+            try:
+                self.port_forwarding = self.api.port_test()
+                self._last_port_test = now
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Port test inconclusive, setting port_forwarding to None")
+                self.port_forwarding = None
+                self._last_port_test = now
 
         return data
 
